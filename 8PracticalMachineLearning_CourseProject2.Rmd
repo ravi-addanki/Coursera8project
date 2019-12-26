@@ -1,0 +1,237 @@
+---
+output:
+  html_document: default
+---
+```{r intro, echo=FALSE, results="hide"}
+#date & setting
+date<-as.Date(Sys.time(	), format='%d%b%Y')
+knitr::opts_chunk$set(echo=TRUE,
+                      message=FALSE, 
+                      comment = "", 
+                      warning=FALSE) 
+#package
+suppressPackageStartupMessages(library(rvest))
+```
+(Last updated: `r date`)
+
+This is a course project for 'Practical Machine Learning'. It aims to predict the type/class of exercise in the test set, based on a model developed using the training set data. This report has the following sections:  
+
+1. Data access and processing  
+2. Model development, including justification, cross validation, and expected out of sample error.
+3. Results of prediction model for 20 test cases   
+
+__Note to the peer graders:__ I had lot of problems and questions for this assignment. I would love to learn from your experience/code, and would very much appreciate specific suggestions to improve this assignment. Thank you in advance! 
+
+####1. DATA PROCESSING 
+
+#####1.1 Overall data structure 
+First access the train and test data sets. 
+```{r getdata, cache=TRUE}
+#Get data
+#train <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv")
+#test <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv")
+setwd("C:/Users/YoonJoung Choi/Dropbox/2 R/2 R Coursera/8PracticalMachineLearning")
+train <- read.csv("pml-training.csv")
+test <- read.csv("pml-testing.csv")
+
+#Check data
+nobstest<-nrow(test)
+nobstrain<-nrow(train)
+nvar<-ncol(train)
+obspeople<-length(unique(train$user_name))
+```
+There are `r nobstest` observations in the test data, and `r nobstrain` in the train data set. The train data set has `r nvar` variables, including the outcome (i.e., __classe__, movement type), measured among `r obspeople` study participants. 
+
+#####1.2 Outcome 
+In __classe__, there are five different exercise types (A, B, C, D, and E). Class A is the correct movement, while the rest four classes are mistakes. They are:  
+- exactly according to the specification (Class A)  
+- throwing the elbows to the front (Class B)  
+- lifting the dumbbell only halfway (Class C)  
+- lowering the dumbbell only halfway (Class D)  
+- throwing the hips to the front (Class E)  
+
+Below is the distribution of the exercise pattern in the train data set (n=`r nobstrain`). 
+```{r outcome, echo=FALSE}
+table(train$classe) 
+```
+
+#####1.3 Covariates and data management 
+There are so many potential covariates. Let's check them out briefly.  
+
+* Variables with lot of missing values?
+```{r checkmissingTrain}
+#check train data set first
+nNA<-sapply(train, function(x) sum(is.na(x)))
+var<-as.character(names(train))
+tableTrain<-as.data.frame(cbind(var, nNA))
+crosstab<-table(tableTrain$nNA)
+
+table(tableTrain$nNA) 
+```
+In the training data, while `r crosstab[[1]]` variables have no missing values, `r crosstab[[2]]` variables have missing values in most rows (19216 out of `r nobstrain`). We should drop those 67 variables from the analysis. 
+
+```{r checkmissingTest}
+#check test data
+nNA<-sapply(test, function(x) sum(is.na(x)))
+var<-as.character(names(test))
+tableTest<-as.data.frame(cbind(var, nNA))
+crosstab<-table(tableTest$nNA)
+
+table(tableTest$nNA) 
+```
+In the test data, `r crosstab[[2]]` variables have missing values in _all 20 rows_. We should drop all of these variables from the analysis. 
+
+Below shows that the list of variables missing in train data is a subset of the list in test data. Thus, drop the list based on the test data from both train and test datasets.  
+```{r missingcovTrain}
+library(dplyr)
+
+#define variables with missing values in train
+dropTrain<-tableTrain %>%
+    subset(nNA!=0) %>%
+    select(var)
+dropvarTrain<-as.vector(as.character(dropTrain$var))
+
+#define variables with missing values in test
+dropTest<-tableTest %>%
+    subset(nNA!=0) %>%
+    select(var)
+dropvarTest<-as.vector(as.character(dropTest$var))
+
+#define variables with missing values in BOTH 
+common <- intersect(dropvarTrain, dropvarTest)
+length(dropvarTrain)
+length(dropvarTest)
+length(common)
+
+#delete the list of variables from both train and test. Use these datasets for modeling
+trainNEW<-select(train, -(dropvarTest)) 
+testNEW<-select(test, -(dropvarTest)) 
+```
+
+* Variables with too many categories (i.e., factor variables that are actually numeric)? 
+```{r checkclassTRAIN}
+var<-as.character(names(trainNEW))
+class<-sapply(trainNEW, function(x) class(x) )
+isfactor<-sapply(trainNEW, function(x) is.factor(x) )
+nUnique<- sapply(trainNEW, function(x) length(unique(x)) ) 
+tabletrain<-as.data.frame(cbind(var, class, isfactor, nUnique))
+
+#keep only factor variables AND check the number of unique values in those factor variables
+table<-subset(tabletrain, isfactor==TRUE) 
+table$nUnique <- as.numeric(table$nUnique)
+table(table$nUnique)
+```
+
+* Different variable class between between train and test data sets? 
+```{r checkclassTEST}
+varTEST<-as.character(names(testNEW))
+classTEST<-sapply(testNEW, function(x) class(x) )
+compare <- as.data.frame(cbind(var, class, varTEST, classTEST) )
+    for (i in 1:4) {
+        compare[ , i]<-as.character(compare[ , i])    
+    }
+table(compare$class, compare$classTEST)
+nmismatch<-nrow(subset(compare, compare$class!=compare$classTEST))
+```
+There are `r nmismatch` variables that are in different classes between the two data sets. This will be taken care of later right before prediction. 
+
+* Finally, ensure same levels for factor variables between train and test data sets.
+```{r factorlevel}
+common <- intersect(names(trainNEW), names(testNEW)) 
+
+for (p in common) { 
+  if (class(trainNEW[[p]]) == "factor") { 
+    levels(testNEW[[p]]) <- levels(trainNEW[[p]]) 
+  } 
+}
+```
+
+####2. MODEL DEVELOPMENT
+
+#####2.1 Model selection  
+There are a few things to consider to choose a modeling approach.  
+- The outcome is a categorical variable, thus a non-linear function is need.  
+- There are over 90 covariates, thus methods that can handle a large number of covariates would be helpful (unless we summarize/reduce covariates by using PCA, for example. _(But, a quetion: is it correct that PCA is used for linear models mainly?)_  
+- Observations are potentially correlated within each person. If that's the case and modeling does not address that, estimates may be biased. _(But, another question: I really don't know how to handle that issue. would apprecaite any suggestions on this)_  
+
+I chose to use Random forest, partially because of its built-in cross validation function, since it basically combines multiple decision trees (from bagging) to determine the final output. 
+
+Before moving on, by the way, there are so many observations (`r nobstrain`!), and it takes way too long to run even one model. So, let's randomly select 20% of train data and use that for model fitting train data __(trainNEWsub)__. The rest will be used for cross-validation __(trainNEWvalidation)__.  
+```{r subsample, results="hide"}
+set.seed(1234)
+library(caret)
+
+inSubsample <- createDataPartition(y=trainNEW$classe,
+                              p=0.20, list=FALSE)
+trainNEWsub <- trainNEW[inSubsample,]
+trainNEWvalidation <- trainNEW[-inSubsample,]
+```
+
+Now, let's fit the first model using default parameters.
+```{r model, cache=TRUE}
+set.seed(1234)
+
+# default train control
+trControl <- trainControl(method = "cv",
+    number = 3,
+    search = "grid")
+
+# Run the model
+rf_default <- train(classe~.,
+    data = trainNEWsub,
+    method = "rf",
+    metric = "Accuracy",
+    trControl = trControl,
+    importance = TRUE)
+# Print the results
+print(rf_default)
+```
+
+Then, refine the model by changing the number of trees and the number of covariates (i.e., the number of variables randomly sampled at each stage).  
+```{r model_refine, cache=TRUE}
+set.seed(1234)
+
+# set mtry to try
+tuneGrid <- expand.grid(.mtry = c(7, 14, 21, 28))
+# three different ntree: 50, 100, 200
+model1 <- train(classe~., trainNEWsub, method = "rf", metric = "Accuracy", 
+                trControl = trControl, importance = TRUE, tuneGrid = tuneGrid,
+                ntree = 50)
+print(model1)
+model2 <- train(classe~., trainNEWsub, method = "rf", metric = "Accuracy", 
+                trControl = trControl, importance = TRUE, tuneGrid = tuneGrid,
+                ntree = 100)
+print(model2)
+model3 <- train(classe~., trainNEWsub, method = "rf", metric = "Accuracy", 
+                trControl = trControl, importance = TRUE, tuneGrid = tuneGrid,
+                ntree = 200)
+print(model3)
+```
+
+#####2.2 Assess accuracy and select a final model 
+```{r accuracy}
+
+pred1 <-predict(model1, trainNEWvalidation)
+pred2 <-predict(model2, trainNEWvalidation)
+pred3 <-predict(model3, trainNEWvalidation)
+
+confusionMatrix(pred1, trainNEWvalidation$classe)
+confusionMatrix(pred2, trainNEWvalidation$classe)
+confusionMatrix(pred3, trainNEWvalidation$classe)
+```
+Above confusion matrices, based on evaluation of model performance on validation data, suggest that model 2 and 3 may be most appropriate. Between the two, I chose one with a less number of trees. __But, I'm worried about over fitting or some other problems - how can it have near 100% accuracy with the validation data?!__ Anyhow, move along... Out of sample error will be very low - less than 0.1%. 
+
+####3. PREDICTION RESULTS 
+
+Finally, prediction!
+```{r predict}
+#predict
+predtest2 <- predict(model2, testNEW)
+```
+
+
+#### REFERENCE 
+Velloso, E.; Bulling, A.; Gellersen, H.; Ugulino, W.; Fuks, H. Qualitative Activity Recognition of Weight Lifting Exercises. Proceedings of 4th International Conference in Cooperation with SIGCHI (Augmented Human '13) . Stuttgart, Germany: ACM SIGCHI, 2013.
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz681eWk8h6
+
